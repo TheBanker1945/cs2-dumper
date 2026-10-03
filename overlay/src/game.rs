@@ -8,6 +8,9 @@ use crate::mem::GameProcess;
 
 pub const MAX_BONES: usize = 28;
 const BONE_ARRAY_OFFSET: u64 = 0x80;
+/// Size of a CEntityIdentity entry in the entity list chunks (was 0x78 before
+/// a CS2 update; with the wrong stride no players are found at all).
+const ENTITY_IDENTITY_SIZE: u64 = 0x70;
 
 pub const BONE_CONNECTIONS: &[(usize, usize)] = &[
     (6, 5),   // head -> neck
@@ -147,7 +150,7 @@ fn read_players(proc: &GameProcess, offsets: &Offsets, client_base: u64) -> Vec<
                 _ => continue,
             };
 
-        let controller = match proc.read::<u64>(list_entry + 0x78 * (i & 0x1FF)) {
+        let controller = match proc.read::<u64>(list_entry + ENTITY_IDENTITY_SIZE * (i & 0x1FF)) {
             Some(v) if v != 0 => v,
             _ => continue,
         };
@@ -169,7 +172,7 @@ fn read_players(proc: &GameProcess, offsets: &Offsets, client_base: u64) -> Vec<
         };
 
         let pawn =
-            match proc.read::<u64>(pawn_entry + 0x78 * (pawn_handle as u64 & 0x1FF)) {
+            match proc.read::<u64>(pawn_entry + ENTITY_IDENTITY_SIZE * (pawn_handle as u64 & 0x1FF)) {
                 Some(v) if v != 0 => v,
                 _ => continue,
             };

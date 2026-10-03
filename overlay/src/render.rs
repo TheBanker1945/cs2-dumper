@@ -1,5 +1,5 @@
 use windows::core::w;
-use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT};
+use windows::Win32::Foundation::{COLORREF, HWND, RECT};
 use windows::Win32::Graphics::Gdi::*;
 
 use crate::game::{PlayerData, BONE_CONNECTIONS, MAX_BONES};
@@ -15,6 +15,7 @@ const T_COLOR_DIM: COLORREF = COLORREF(0x003090CC);
 const MENU_BG: COLORREF = COLORREF(0x00281E1E);
 const MENU_HEADER_BG: COLORREF = COLORREF(0x00322323);
 const MENU_ACCENT: COLORREF = COLORREF(0x00FF7864);
+const MENU_SELECTED_BG: COLORREF = COLORREF(0x003C2D2D);
 const MENU_TEXT: COLORREF = COLORREF(0x00E6E6E6);
 const MENU_SUBTEXT: COLORREF = COLORREF(0x00A09696);
 const TOGGLE_ON: COLORREF = COLORREF(0x0078C850);
@@ -183,12 +184,12 @@ impl Renderer {
         }
     }
 
-    pub fn draw_menu(&mut self, players: &[PlayerData], visible: &[bool; 65]) {
+    pub fn draw_menu(&mut self, players: &[PlayerData], visible: &[bool; 65], selected: usize) {
         self.toggle_areas.clear();
         let dc = self.mem_dc;
 
         let player_count = players.len() as i32;
-        let footer_h = 40;
+        let footer_h = 56;
         let toggle_all_h = ROW_H;
         let menu_h = HEADER_H + 2 + toggle_all_h + player_count * ROW_H + footer_h;
 
@@ -223,6 +224,22 @@ impl Renderer {
             DrawTextW(dc, &mut sub, &mut sub_rc, DT_LEFT | DT_NOCLIP);
 
             let ta_y = MENU_Y + HEADER_H + 2;
+            let row_count = 1 + players.len();
+            let sel_row = selected.min(row_count - 1) as i32;
+            let sel_brush = CreateSolidBrush(MENU_SELECTED_BG);
+            let sel_rect = RECT {
+                left: MENU_X,
+                top: ta_y + sel_row * ROW_H,
+                right: MENU_X + MENU_W,
+                bottom: ta_y + (sel_row + 1) * ROW_H,
+            };
+            FillRect(dc, &sel_rect, sel_brush);
+            let _ = DeleteObject(sel_brush);
+            let acc = CreateSolidBrush(MENU_ACCENT);
+            let acc_bar = RECT { right: MENU_X + 3, ..sel_rect };
+            FillRect(dc, &acc_bar, acc);
+            let _ = DeleteObject(acc);
+
             SelectObject(dc, self.font);
             SetTextColor(dc, MENU_TEXT);
             let mut ta_text: Vec<u16> = "Toggle All".encode_utf16().collect();
@@ -281,34 +298,15 @@ impl Renderer {
             let fy = rows_start + player_count * ROW_H + 8;
             SelectObject(dc, self.font_small);
             SetTextColor(dc, MENU_SUBTEXT);
+            let mut nav: Vec<u16> = "UP/DOWN: Select  |  ENTER: Toggle".encode_utf16().collect();
+            let mut nav_rc = RECT { left: MENU_X + 16, top: fy, right: MENU_X + MENU_W - 16, bottom: fy + 20 };
+            DrawTextW(dc, &mut nav, &mut nav_rc, DT_CENTER | DT_NOCLIP);
+
             let mut hint: Vec<u16> = "INSERT: Toggle Menu  |  END: Exit".encode_utf16().collect();
-            let mut hint_rc = RECT { left: MENU_X + 16, top: fy, right: MENU_X + MENU_W - 16, bottom: fy + 20 };
+            let mut hint_rc = RECT { left: MENU_X + 16, top: fy + 20, right: MENU_X + MENU_W - 16, bottom: fy + 40 };
             DrawTextW(dc, &mut hint, &mut hint_rc, DT_CENTER | DT_NOCLIP);
 
             SelectObject(dc, old_font);
-        }
-    }
-}
-
-impl Renderer {
-    pub fn draw_cursor(&self, x: i32, y: i32) {
-        let dc = self.mem_dc;
-        let pts = [
-            POINT { x, y },
-            POINT { x, y: y + 18 },
-            POINT { x: x + 5, y: y + 13 },
-            POINT { x: x + 12, y: y + 13 },
-        ];
-        unsafe {
-            let pen = CreatePen(PS_SOLID, 1, COLORREF(0x00000000));
-            let brush = CreateSolidBrush(COLORREF(0x00FFFFFF));
-            let old_pen = SelectObject(dc, pen);
-            let old_brush = SelectObject(dc, brush);
-            let _ = Polygon(dc, &pts);
-            SelectObject(dc, old_pen);
-            SelectObject(dc, old_brush);
-            let _ = DeleteObject(pen);
-            let _ = DeleteObject(brush);
         }
     }
 }

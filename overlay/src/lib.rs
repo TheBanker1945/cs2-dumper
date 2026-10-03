@@ -4,7 +4,6 @@ use windows::core::w;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -77,13 +76,21 @@ pub fn run() {
     let mut renderer = Renderer::new(screen_w, screen_h);
     let mut visible: [bool; 65] = [true; 65];
     let mut menu_open = false;
-    let mut insert_was_down = false;
-    let mut mouse_was_down = false;
-    let mut game_hwnd = HWND::default();
+    // Row 0 is "Toggle All", rows 1.. are the listed players.
+    let mut selected: usize = 0;
+    let mut insert_key = KeyEdge::new(VK_INSERT_CODE);
+    let mut mouse_key = KeyEdge::new(0x01);
+    let mut up_key = KeyEdge::new(VK_UP.0 as i32);
+    let mut down_key = KeyEdge::new(VK_DOWN.0 as i32);
+    let mut left_key = KeyEdge::new(VK_LEFT.0 as i32);
+    let mut right_key = KeyEdge::new(VK_RIGHT.0 as i32);
+    let mut enter_key = KeyEdge::new(VK_RETURN.0 as i32);
 
     println!("[+] Overlay running!");
-    println!("    INSERT = Toggle Menu");
-    println!("    END    = Exit\n");
+    println!("    INSERT          = Toggle Menu");
+    println!("    UP / DOWN       = Select row");
+    println!("    ENTER / <- / -> = Toggle selected row");
+    println!("    END             = Exit\n");
 
     loop {
         unsafe {
@@ -102,25 +109,39 @@ pub fn run() {
             break;
         }
 
-        let insert_is_down = key_down(VK_INSERT_CODE);
-        if insert_is_down && !insert_was_down {
+        if insert_key.pressed() {
             menu_open = !menu_open;
-            set_menu_focus(hwnd, menu_open, &mut game_hwnd);
+            set_click_through(hwnd, !menu_open);
         }
-        insert_was_down = insert_is_down;
 
-        let mouse_is_down = key_down(0x01);
-        let mouse_clicked = mouse_is_down && !mouse_was_down;
-        mouse_was_down = mouse_is_down;
+        // Poll every key each frame so edge state stays current even while the menu is closed.
+        let clicked = mouse_key.pressed();
+        let up = up_key.pressed();
+        let down = down_key.pressed();
+        let toggle = enter_key.pressed() | left_key.pressed() | right_key.pressed();
 
-        let (mx, my) = get_cursor_pos(hwnd);
         if menu_open {
-            // In-game, CS2 clips the cursor to the screen centre; keep it released.
-            unsafe {
-                let _ = ClipCursor(None);
+            // Keyboard navigation works in every display mode. In a match CS2 owns the
+            // cursor (hidden and pinned to the screen centre), so mouse clicks can't
+            // reach the menu there.
+            let row_count = 1 + renderer.toggle_areas.len();
+            selected = selected.min(row_count - 1);
+            if up {
+                selected = (selected + row_count - 1) % row_count;
             }
-            if mouse_clicked {
-                handle_menu_click(&renderer, &mut visible, mx, my);
+            if down {
+                selected = (selected + 1) % row_count;
+            }
+            if toggle {
+                toggle_row(&renderer, &mut visible, selected);
+            }
+
+            if clicked {
+                let (mx, my) = get_cursor_pos(hwnd);
+                if let Some(row) = row_at(&renderer, mx, my) {
+                    selected = row;
+                    toggle_row(&renderer, &mut visible, row);
+                }
             }
         }
 
@@ -144,9 +165,7 @@ pub fn run() {
         }
 
         if menu_open {
-            renderer.draw_menu(&state.players, &visible);
-            // CS2 hides the system cursor in-game, so draw our own.
-            renderer.draw_cursor(mx, my);
+            renderer.draw_menu(&state.players, &visible, selected);
         }
 
         renderer.end_frame(hwnd);
@@ -254,48 +273,42 @@ fn set_click_through(hwnd: HWND, click_through: bool) {
     }
 }
 
-/// While the menu is open the overlay must own focus: otherwise CS2 keeps the
-/// cursor locked/hidden at the screen centre and every click hit-tests there.
-fn set_menu_focus(hwnd: HWND, menu_open: bool, game_hwnd: &mut HWND) {
-    set_click_through(hwnd, !menu_open);
-    unsafe {
-        if menu_open {
-            let fg = GetForegroundWindow();
-            if fg != hwnd {
-                *game_hwnd = fg;
-            }
-            force_foreground(hwnd);
-            let _ = ClipCursor(None);
-        } else if !game_hwnd.0.is_null() && IsWindow(*game_hwnd).as_bool() {
-            force_foreground(*game_hwnd);
-        }
+/// Rising-edge detector over GetAsyncKeyState's reliable "is down" bit.
+struct KeyEdge {
+    vk: i32,
+    was_down: bool,
+}
+
+impl KeyEdge {
+    fn new(vk: i32) -> Self {
+        Self { vk, was_down: false }
+    }
+
+    fn pressed(&mut self) -> bool {
+        let down = key_down(self.vk);
+        let pressed = down && !self.was_down;
+        self.was_down = down;
+        pressed
     }
 }
 
-/// SetForegroundWindow is ignored for background processes unless we attach to
-/// the current foreground thread's input queue first.
-unsafe fn force_foreground(target: HWND) {
-    let fg = GetForegroundWindow();
-    let fg_thread = GetWindowThreadProcessId(fg, None);
-    let our_thread = GetCurrentThreadId();
-    let attached = fg_thread != 0
-        && fg_thread != our_thread
-        && AttachThreadInput(our_thread, fg_thread, true).as_bool();
-
-    let _ = BringWindowToTop(target);
-    let _ = SetForegroundWindow(target);
-    let _ = SetFocus(target);
-
-    if attached {
-        let _ = AttachThreadInput(our_thread, fg_thread, false);
-    }
-}
-
-fn handle_menu_click(renderer: &Renderer, visible: &mut [bool; 65], mx: i32, my: i32) {
+/// Menu row under the cursor: 0 = "Toggle All", 1.. = player rows.
+fn row_at(renderer: &Renderer, mx: i32, my: i32) -> Option<usize> {
     let (l, t, r, b) = renderer.toggle_all_rect;
     if mx >= l && mx <= r && my >= t && my <= b {
+        return Some(0);
+    }
+    renderer
+        .toggle_areas
+        .iter()
+        .position(|a| mx >= a.left && mx <= a.right && my >= a.top && my <= a.bottom)
+        .map(|i| i + 1)
+}
+
+fn toggle_row(renderer: &Renderer, visible: &mut [bool; 65], row: usize) {
+    if row == 0 {
         // Decide from the players shown in the menu (same as the drawn toggle state),
-        // not all 64 slots — unused slots stay `true` and would make this a no-op.
+        // not all 64 slots â€” unused slots stay `true` and would make this a no-op.
         let any_on = renderer
             .toggle_areas
             .iter()
@@ -303,14 +316,8 @@ fn handle_menu_click(renderer: &Renderer, visible: &mut [bool; 65], mx: i32, my:
         for v in visible.iter_mut().skip(1).take(64) {
             *v = !any_on;
         }
-        return;
-    }
-
-    for area in &renderer.toggle_areas {
-        if mx >= area.left && mx <= area.right && my >= area.top && my <= area.bottom {
-            visible[area.player_index] = !visible[area.player_index];
-            return;
-        }
+    } else if let Some(area) = renderer.toggle_areas.get(row - 1) {
+        visible[area.player_index] = !visible[area.player_index];
     }
 }
 

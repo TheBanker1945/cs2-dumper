@@ -1,9 +1,10 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use windows::core::w;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -76,8 +77,9 @@ pub fn run() {
     let mut renderer = Renderer::new(screen_w, screen_h);
     let mut visible: [bool; 65] = [true; 65];
     let mut menu_open = false;
-    let mut last_toggle = Instant::now();
+    let mut insert_was_down = false;
     let mut mouse_was_down = false;
+    let mut game_hwnd = HWND::default();
 
     println!("[+] Overlay running!");
     println!("    INSERT = Toggle Menu");
@@ -100,20 +102,26 @@ pub fn run() {
             break;
         }
 
-        let now = Instant::now();
-        if key_down(VK_INSERT_CODE) && now.duration_since(last_toggle).as_millis() > 300 {
+        let insert_is_down = key_down(VK_INSERT_CODE);
+        if insert_is_down && !insert_was_down {
             menu_open = !menu_open;
-            set_click_through(hwnd, !menu_open);
-            last_toggle = now;
+            set_menu_focus(hwnd, menu_open, &mut game_hwnd);
         }
+        insert_was_down = insert_is_down;
 
         let mouse_is_down = key_down(0x01);
         let mouse_clicked = mouse_is_down && !mouse_was_down;
         mouse_was_down = mouse_is_down;
 
-        if menu_open && mouse_clicked {
-            let (mx, my) = get_cursor_pos(hwnd);
-            handle_menu_click(&renderer, &mut visible, mx, my);
+        let (mx, my) = get_cursor_pos(hwnd);
+        if menu_open {
+            // In-game, CS2 clips the cursor to the screen centre; keep it released.
+            unsafe {
+                let _ = ClipCursor(None);
+            }
+            if mouse_clicked {
+                handle_menu_click(&renderer, &mut visible, mx, my);
+            }
         }
 
         let state = read_game_state(&process, &offsets, client_base, engine_base);
@@ -137,6 +145,8 @@ pub fn run() {
 
         if menu_open {
             renderer.draw_menu(&state.players, &visible);
+            // CS2 hides the system cursor in-game, so draw our own.
+            renderer.draw_cursor(mx, my);
         }
 
         renderer.end_frame(hwnd);
@@ -232,6 +242,52 @@ fn set_click_through(hwnd: HWND, click_through: bool) {
             style & !WS_EX_TRANSPARENT.0
         };
         SetWindowLongW(hwnd, GWL_EXSTYLE, new_style as i32);
+        let _ = SetWindowPos(
+            hwnd,
+            HWND::default(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+    }
+}
+
+/// While the menu is open the overlay must own focus: otherwise CS2 keeps the
+/// cursor locked/hidden at the screen centre and every click hit-tests there.
+fn set_menu_focus(hwnd: HWND, menu_open: bool, game_hwnd: &mut HWND) {
+    set_click_through(hwnd, !menu_open);
+    unsafe {
+        if menu_open {
+            let fg = GetForegroundWindow();
+            if fg != hwnd {
+                *game_hwnd = fg;
+            }
+            force_foreground(hwnd);
+            let _ = ClipCursor(None);
+        } else if !game_hwnd.0.is_null() && IsWindow(*game_hwnd).as_bool() {
+            force_foreground(*game_hwnd);
+        }
+    }
+}
+
+/// SetForegroundWindow is ignored for background processes unless we attach to
+/// the current foreground thread's input queue first.
+unsafe fn force_foreground(target: HWND) {
+    let fg = GetForegroundWindow();
+    let fg_thread = GetWindowThreadProcessId(fg, None);
+    let our_thread = GetCurrentThreadId();
+    let attached = fg_thread != 0
+        && fg_thread != our_thread
+        && AttachThreadInput(our_thread, fg_thread, true).as_bool();
+
+    let _ = BringWindowToTop(target);
+    let _ = SetForegroundWindow(target);
+    let _ = SetFocus(target);
+
+    if attached {
+        let _ = AttachThreadInput(our_thread, fg_thread, false);
     }
 }
 

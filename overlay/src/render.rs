@@ -1,5 +1,5 @@
 use windows::core::w;
-use windows::Win32::Foundation::{COLORREF, HWND, RECT};
+use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::*;
 
 use crate::game::{PlayerData, BONE_CONNECTIONS, MAX_BONES};
@@ -286,6 +286,29 @@ impl Renderer {
             DrawTextW(dc, &mut hint, &mut hint_rc, DT_CENTER | DT_NOCLIP);
 
             SelectObject(dc, old_font);
+        }
+    }
+}
+
+impl Renderer {
+    pub fn draw_cursor(&self, x: i32, y: i32) {
+        let dc = self.mem_dc;
+        let pts = [
+            POINT { x, y },
+            POINT { x, y: y + 18 },
+            POINT { x: x + 5, y: y + 13 },
+            POINT { x: x + 12, y: y + 13 },
+        ];
+        unsafe {
+            let pen = CreatePen(PS_SOLID, 1, COLORREF(0x00000000));
+            let brush = CreateSolidBrush(COLORREF(0x00FFFFFF));
+            let old_pen = SelectObject(dc, pen);
+            let old_brush = SelectObject(dc, brush);
+            let _ = Polygon(dc, &pts);
+            SelectObject(dc, old_pen);
+            SelectObject(dc, old_brush);
+            let _ = DeleteObject(pen);
+            let _ = DeleteObject(brush);
         }
     }
 }

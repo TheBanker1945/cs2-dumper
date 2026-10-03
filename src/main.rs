@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 
 use clap::{ArgAction, Parser};
 
@@ -70,8 +70,44 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
+    #[allow(unused_mut)]
+    let mut args = Args::parse();
 
+    // Double-clicking the exe (or starting it from a shortcut) passes no arguments. Treat that
+    // as "dump fresh offsets, then launch the overlay", and keep the console open on errors.
+    #[cfg(windows)]
+    let launched_bare = std::env::args_os().len() <= 1;
+    #[cfg(not(windows))]
+    let launched_bare = false;
+
+    if launched_bare {
+        #[cfg(windows)]
+        {
+            args.overlay = true;
+        }
+
+        // Shortcuts and pinned launches may start us in an arbitrary directory; keep output/
+        // and the log file next to the exe so the overlay always finds the fresh dump.
+        if let Some(dir) = std::env::current_exe()?.parent() {
+            std::env::set_current_dir(dir)?;
+        }
+    }
+
+    let result = run(args);
+
+    if launched_bare {
+        if let Err(e) = &result {
+            eprintln!("\n[!] {:?}", e);
+            println!("\nPress Enter to exit...");
+            let _ = std::io::stdin().read_line(&mut String::new());
+            std::process::exit(1);
+        }
+    }
+
+    result
+}
+
+fn run(args: Args) -> Result<()> {
     let level_filter = match args.verbose {
         0 => LevelFilter::Error,
         1 => LevelFilter::Warn,
@@ -126,7 +162,14 @@ fn main() -> Result<()> {
         }
     };
 
-    let mut process = os.process_by_name(&args.process_name)?;
+    let mut process = os
+        .process_by_name(&args.process_name)
+        .with_context(|| format!("{} is not running. Start the game first.", args.process_name))?;
+
+    #[cfg(windows)]
+    if args.overlay {
+        println!("[*] Dumping offsets from {}...", args.process_name);
+    }
 
     let now = Instant::now();
 

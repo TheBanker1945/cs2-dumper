@@ -62,6 +62,11 @@ struct Args {
     /// Prevent creation of the cs2-dumper.log file.
     #[arg(short, long)]
     no_log_file: bool,
+
+    /// Launch the ESP overlay after dumping completes.
+    #[cfg(windows)]
+    #[arg(long)]
+    overlay: bool,
 }
 
 fn main() -> Result<()> {
@@ -131,6 +136,12 @@ fn main() -> Result<()> {
     output.dump_all(&mut process)?;
 
     info!("analysis completed in {:.2?}", now.elapsed());
+
+    #[cfg(windows)]
+    if args.overlay {
+        println!("\n[*] Launching ESP overlay...");
+        cs2_overlay::run();
+    }
 
     Ok(())
 }

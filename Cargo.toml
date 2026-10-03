@@ -1,3 +1,6 @@
+[workspace]
+members = ["overlay"]
+
 [package]
 name = "cs2-dumper"
 version = "0.1.3"
@@ -22,6 +25,7 @@ simplelog = "0.12"
 
 [target.'cfg(windows)'.dependencies]
 memflow-native = { git = "https://github.com/memflow/memflow-native" }
+cs2-overlay = { path = "overlay" }
 
 [profile.dev]
 opt-level = 1

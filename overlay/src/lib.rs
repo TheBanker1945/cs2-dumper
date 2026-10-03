@@ -238,7 +238,12 @@ fn set_click_through(hwnd: HWND, click_through: bool) {
 fn handle_menu_click(renderer: &Renderer, visible: &mut [bool; 65], mx: i32, my: i32) {
     let (l, t, r, b) = renderer.toggle_all_rect;
     if mx >= l && mx <= r && my >= t && my <= b {
-        let any_on = visible.iter().skip(1).take(64).any(|&v| v);
+        // Decide from the players shown in the menu (same as the drawn toggle state),
+        // not all 64 slots — unused slots stay `true` and would make this a no-op.
+        let any_on = renderer
+            .toggle_areas
+            .iter()
+            .any(|area| visible[area.player_index]);
         for v in visible.iter_mut().skip(1).take(64) {
             *v = !any_on;
         }

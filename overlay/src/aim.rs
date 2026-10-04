@@ -309,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn aims_at_enemy_humans() {
+    fn aims_at_enemy_clients() {
         let s = state(vec![
             local(),
             player(200, 2, false, head_at(0.0, 1.0)),

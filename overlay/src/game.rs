@@ -162,7 +162,7 @@ pub struct PlayerData {
     pub index: u32,
     /// Entity index of the player's pawn.
     pub pawn_index: u32,
-    /// A bot still driving its own pawn (not taken over by a human).
+    /// A bot still driving its own pawn (not taken over by a client).
     pub is_bot: bool,
     /// Players the server sees as having line of sight to this one, as bit `index - 1`
     /// per spotter. Only enemies ever spot.
@@ -328,9 +328,9 @@ fn read_players(
             local_pawn = Some(pawn);
         }
 
-        // Bots have no Steam ID and carry FL_FAKECLIENT. A human taking over a bot becomes
-        // its pawn's controller, so the pawn must also be driven by this controller.
-        // Unreadable values count as human, so a failed read can never mark a bot.
+        // Bots have no Steam ID and carry FL_FAKECLIENT. A client taking over a bot
+        // becomes its pawn's controller, so the pawn must also be driven by this controller.
+        // Unreadable values count as a client, so a failed read can never mark a bot.
         let fake_client = proc.read::<u64>(controller + offsets.m_steam_id) == Some(0)
             && proc
                 .read::<u32>(controller + offsets.m_f_flags)

@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::core::w;
 use windows::Win32::Foundation::*;
@@ -7,17 +7,38 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+mod aim;
 mod game;
 mod math;
 mod mem;
 mod render;
+mod smoke;
+mod trigger;
+mod visibility;
+mod weapons;
 
+use aim::AimAssist;
 use game::{read_game_state, Offsets};
 use mem::GameProcess;
-use render::Renderer;
+use render::{EspParts, Renderer};
+use smoke::SmokeScanner;
+use trigger::TriggerBot;
+use visibility::Visibility;
 
 const VK_INSERT_CODE: i32 = 0x2D;
 const VK_END_CODE: i32 = 0x23;
+
+/// Menu rows and their state at startup. Every row works on its own.
+const MENU_ROWS: [(&str, bool); 4] = [
+    ("Skeleton", true),
+    ("Health Bar", true),
+    ("Weapon", true),
+    ("Trigger Bot (hold Mouse 4)", false),
+];
+const ROW_SKELETON: usize = 0;
+const ROW_HEALTH: usize = 1;
+const ROW_WEAPON: usize = 2;
+const ROW_TRIGGER: usize = 3;
 
 pub fn run() {
     println!("=== CS2 Skeleton ESP Overlay ===");
@@ -74,9 +95,12 @@ pub fn run() {
     }
 
     let mut renderer = Renderer::new(screen_w, screen_h);
-    let mut visible: [bool; 65] = [true; 65];
+    let mut toggles = MENU_ROWS.map(|(_, on)| on);
+    let mut trigger = TriggerBot::new();
+    let mut aim = AimAssist::new();
+    let mut visibility = Visibility::new();
+    let mut smoke_scanner = SmokeScanner::new();
     let mut menu_open = false;
-    // Row 0 is "Toggle All", rows 1.. are the listed players.
     let mut selected: usize = 0;
     let mut insert_key = KeyEdge::new(VK_INSERT_CODE);
     let mut mouse_key = KeyEdge::new(0x01);
@@ -90,7 +114,9 @@ pub fn run() {
     println!("    INSERT          = Toggle Menu");
     println!("    UP / DOWN       = Select row");
     println!("    ENTER / <- / -> = Toggle selected row");
-    println!("    END             = Exit\n");
+    println!("    END             = Exit");
+    println!("    Trigger Bot is off at startup. Hold Mouse 4 to snap to the head of an enemy bot");
+    println!("    in clear view and fire; shooting by hand also pulls onto the head. Never humans.\n");
 
     loop {
         unsafe {
@@ -124,8 +150,7 @@ pub fn run() {
             // Keyboard navigation works in every display mode. In a match CS2 owns the
             // cursor (hidden and pinned to the screen centre), so mouse clicks can't
             // reach the menu there.
-            let row_count = 1 + renderer.toggle_areas.len();
-            selected = selected.min(row_count - 1);
+            let row_count = MENU_ROWS.len();
             if up {
                 selected = (selected + row_count - 1) % row_count;
             }
@@ -133,41 +158,56 @@ pub fn run() {
                 selected = (selected + 1) % row_count;
             }
             if toggle {
-                toggle_row(&renderer, &mut visible, selected);
+                toggles[selected] = !toggles[selected];
             }
 
             if clicked {
                 let (mx, my) = get_cursor_pos(hwnd);
-                if let Some(row) = row_at(&renderer, mx, my) {
+                if let Some(row) = renderer.row_at(mx, my) {
                     selected = row;
-                    toggle_row(&renderer, &mut visible, row);
+                    toggles[row] = !toggles[row];
                 }
             }
         }
 
-        let state = read_game_state(&process, &offsets, client_base, engine_base);
+        let state = read_game_state(&process, &offsets, client_base, engine_base, &mut smoke_scanner);
+        visibility.update(&state, Instant::now());
+
+        // Head aim is part of the trigger bot: holding Mouse 4 pulls onto the head and
+        // fires once the crosshair is there, and shooting by hand pulls onto it too.
+        let trigger_on = toggles[ROW_TRIGGER] && !menu_open && game_focused(process.pid());
+        let trigger_key = trigger_on && key_down(VK_XBUTTON1.0 as i32);
+        let aiming = trigger_key || (trigger_on && key_down(VK_LBUTTON.0 as i32));
+        aim.update(aiming, &state, &visibility);
+        trigger.update(trigger_key && aim.lined_up(), &state, &visibility);
 
         renderer.begin_frame();
 
-        for player in &state.players {
-            if player.is_local {
-                continue;
-            }
-            if !visible[player.index] {
-                continue;
-            }
-            renderer.draw_skeleton(
+        let parts = EspParts {
+            skeleton: toggles[ROW_SKELETON],
+            health: toggles[ROW_HEALTH],
+            weapon: toggles[ROW_WEAPON],
+        };
+        for player in state.players.iter().filter(|p| !p.is_local) {
+            renderer.draw_player(
                 player,
                 &state.view_matrix,
                 state.screen_width,
                 state.screen_height,
+                parts,
             );
         }
 
         if menu_open {
-            renderer.draw_menu(&state.players, &visible, selected);
+            let rows: Vec<(&str, bool)> = MENU_ROWS
+                .iter()
+                .zip(toggles)
+                .map(|(&(label, _), on)| (label, on))
+                .collect();
+            renderer.draw_menu(&rows, selected);
         }
 
+        keep_above_game(hwnd, process.pid());
         renderer.end_frame(hwnd);
 
         std::thread::sleep(Duration::from_millis(16));
@@ -192,8 +232,10 @@ fn create_overlay_window(width: i32, height: i32) -> HWND {
 
         RegisterClassExW(&wc);
 
+        // NOACTIVATE: clicking the menu must never take focus from CS2 — in exclusive
+        // Fullscreen the game minimizes as soon as it loses focus.
         let hwnd = match CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW,
+            WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             class_name,
             w!(""),
             WS_POPUP | WS_VISIBLE,
@@ -252,6 +294,41 @@ fn get_cursor_pos(hwnd: HWND) -> (i32, i32) {
     }
 }
 
+/// Injected clicks go to whichever window has focus, so only fire while it's CS2.
+fn game_focused(game_pid: u32) -> bool {
+    unsafe {
+        let mut pid = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid));
+        pid == game_pid
+    }
+}
+
+/// CS2 (an SDL window) makes itself topmost in Fullscreen mode and re-raises itself
+/// every time it gains focus, which puts it above the overlay. Climb back to the top
+/// of the topmost band whenever one of the game's windows is above ours.
+fn keep_above_game(hwnd: HWND, game_pid: u32) {
+    unsafe {
+        let mut above = GetWindow(hwnd, GW_HWNDPREV);
+        while let Ok(w) = above {
+            let mut pid = 0;
+            GetWindowThreadProcessId(w, Some(&mut pid));
+            if pid == game_pid && IsWindowVisible(w).as_bool() {
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+                return;
+            }
+            above = GetWindow(w, GW_HWNDPREV);
+        }
+    }
+}
+
 fn set_click_through(hwnd: HWND, click_through: bool) {
     unsafe {
         let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
@@ -289,35 +366,6 @@ impl KeyEdge {
         let pressed = down && !self.was_down;
         self.was_down = down;
         pressed
-    }
-}
-
-/// Menu row under the cursor: 0 = "Toggle All", 1.. = player rows.
-fn row_at(renderer: &Renderer, mx: i32, my: i32) -> Option<usize> {
-    let (l, t, r, b) = renderer.toggle_all_rect;
-    if mx >= l && mx <= r && my >= t && my <= b {
-        return Some(0);
-    }
-    renderer
-        .toggle_areas
-        .iter()
-        .position(|a| mx >= a.left && mx <= a.right && my >= a.top && my <= a.bottom)
-        .map(|i| i + 1)
-}
-
-fn toggle_row(renderer: &Renderer, visible: &mut [bool; 65], row: usize) {
-    if row == 0 {
-        // Decide from the players shown in the menu (same as the drawn toggle state),
-        // not all 64 slots â€” unused slots stay `true` and would make this a no-op.
-        let any_on = renderer
-            .toggle_areas
-            .iter()
-            .any(|area| visible[area.player_index]);
-        for v in visible.iter_mut().skip(1).take(64) {
-            *v = !any_on;
-        }
-    } else if let Some(area) = renderer.toggle_areas.get(row - 1) {
-        visible[area.player_index] = !visible[area.player_index];
     }
 }
 

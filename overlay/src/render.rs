@@ -2,8 +2,9 @@ use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HWND, RECT};
 use windows::Win32::Graphics::Gdi::*;
 
-use crate::game::{PlayerData, BONE_CONNECTIONS, MAX_BONES};
+use crate::game::{PlayerData, BONE_CONNECTIONS, HEAD_BONE, MAX_BONES, ROOT_BONE};
 use crate::math::{world_to_screen, ViewMatrix};
+use crate::weapons::weapon_info;
 
 const COLORKEY: COLORREF = COLORREF(0x00FF00FF);
 
@@ -11,6 +12,9 @@ const CT_COLOR: COLORREF = COLORREF(0x00FFB478);
 const T_COLOR: COLORREF = COLORREF(0x0050C8FF);
 const CT_COLOR_DIM: COLORREF = COLORREF(0x00CC8050);
 const T_COLOR_DIM: COLORREF = COLORREF(0x003090CC);
+
+const ESP_TEXT: COLORREF = COLORREF(0x00F0F0F0);
+const ESP_TEXT_OUTLINE: COLORREF = COLORREF(0x00000000);
 
 const MENU_BG: COLORREF = COLORREF(0x00281E1E);
 const MENU_HEADER_BG: COLORREF = COLORREF(0x00322323);
@@ -28,12 +32,12 @@ const MENU_W: i32 = 320;
 const ROW_H: i32 = 34;
 const HEADER_H: i32 = 52;
 
-pub struct ToggleArea {
-    pub player_index: usize,
-    pub left: i32,
-    pub top: i32,
-    pub right: i32,
-    pub bottom: i32,
+/// Which parts of the ESP to draw for each player.
+#[derive(Clone, Copy)]
+pub struct EspParts {
+    pub skeleton: bool,
+    pub health: bool,
+    pub weapon: bool,
 }
 
 pub struct Renderer {
@@ -43,10 +47,13 @@ pub struct Renderer {
     font: HFONT,
     font_title: HFONT,
     font_small: HFONT,
+    /// In-world text. Not antialiased: blending against the colour key would leave
+    /// magenta fringes around every glyph.
+    font_esp: HFONT,
     pub width: i32,
     pub height: i32,
-    pub toggle_areas: Vec<ToggleArea>,
-    pub toggle_all_rect: (i32, i32, i32, i32),
+    /// Clickable area of each menu row, in row order.
+    pub menu_rows: Vec<RECT>,
 }
 
 impl Renderer {
@@ -61,6 +68,12 @@ impl Renderer {
             let font = create_font(-16, false);
             let font_title = create_font(-20, true);
             let font_small = create_font(-13, false);
+            let font_esp = CreateFontW(
+                -12, 0, 0, 0,
+                400, 0, 0, 0,
+                1, 0, 0, NONANTIALIASED_QUALITY.0 as u32, 0,
+                w!("Tahoma"),
+            );
 
             Self {
                 mem_dc,
@@ -69,10 +82,10 @@ impl Renderer {
                 font,
                 font_title,
                 font_small,
+                font_esp,
                 width,
                 height,
-                toggle_areas: Vec::new(),
-                toggle_all_rect: (0, 0, 0, 0),
+                menu_rows: Vec::new(),
             }
         }
     }
@@ -99,7 +112,14 @@ impl Renderer {
         }
     }
 
-    pub fn draw_skeleton(&self, player: &PlayerData, vm: &ViewMatrix, sw: f32, sh: f32) {
+    pub fn draw_player(
+        &self,
+        player: &PlayerData,
+        vm: &ViewMatrix,
+        sw: f32,
+        sh: f32,
+        parts: EspParts,
+    ) {
         let (color, shadow_color) = if player.team == 3 {
             (CT_COLOR, CT_COLOR_DIM)
         } else {
@@ -113,85 +133,94 @@ impl Renderer {
             .collect();
 
         unsafe {
-            let shadow_pen = CreatePen(PS_SOLID, 4, shadow_color);
-            let old = SelectObject(dc, shadow_pen);
-            draw_bone_lines(dc, &screen_bones);
-            SelectObject(dc, old);
-            let _ = DeleteObject(shadow_pen);
+            if parts.skeleton {
+                let shadow_pen = CreatePen(PS_SOLID, 4, shadow_color);
+                let old = SelectObject(dc, shadow_pen);
+                draw_bone_lines(dc, &screen_bones);
+                SelectObject(dc, old);
+                let _ = DeleteObject(shadow_pen);
 
-            let pen = CreatePen(PS_SOLID, 2, color);
-            let old = SelectObject(dc, pen);
-            draw_bone_lines(dc, &screen_bones);
-            SelectObject(dc, old);
-            let _ = DeleteObject(pen);
+                let pen = CreatePen(PS_SOLID, 2, color);
+                let old = SelectObject(dc, pen);
+                draw_bone_lines(dc, &screen_bones);
+                SelectObject(dc, old);
+                let _ = DeleteObject(pen);
 
-            if let Some((hx, hy)) = screen_bones[6] {
-                let r = 6;
-                let outline_pen = CreatePen(PS_SOLID, 2, color);
-                let null_brush = GetStockObject(NULL_BRUSH);
-                let old_pen = SelectObject(dc, outline_pen);
-                let old_brush = SelectObject(dc, null_brush);
-                let _ = Ellipse(dc, hx as i32 - r, hy as i32 - r, hx as i32 + r, hy as i32 + r);
-                SelectObject(dc, old_pen);
-                SelectObject(dc, old_brush);
-                let _ = DeleteObject(outline_pen);
-            }
-
-            if let (Some((_, head_y)), Some((_, pelvis_y))) = (screen_bones[6], screen_bones[0]) {
-                let top_y = head_y.min(pelvis_y) as i32 - 8;
-                let bot_y = head_y.max(pelvis_y) as i32 + 8;
-                let bar_h = bot_y - top_y;
-                if bar_h > 5 {
-                    let bar_x = screen_bones
-                        .iter()
-                        .filter_map(|b| b.map(|(x, _)| x as i32))
-                        .min()
-                        .unwrap_or(0)
-                        - 10;
-
-                    let bg_brush = CreateSolidBrush(COLORREF(0x00333333));
-                    let bg_rect = RECT { left: bar_x - 4, top: top_y, right: bar_x, bottom: bot_y };
-                    FillRect(dc, &bg_rect, bg_brush);
-                    let _ = DeleteObject(bg_brush);
-
-                    let hp = (player.health as f32 / 100.0).clamp(0.0, 1.0);
-                    let r = ((1.0 - hp) * 255.0) as u32;
-                    let g = (hp * 255.0) as u32;
-                    let fill_color = COLORREF(r | (g << 8));
-                    let fill_h = (bar_h as f32 * hp) as i32;
-                    let fill_brush = CreateSolidBrush(fill_color);
-                    let fill_rect = RECT { left: bar_x - 4, top: bot_y - fill_h, right: bar_x, bottom: bot_y };
-                    FillRect(dc, &fill_rect, fill_brush);
-                    let _ = DeleteObject(fill_brush);
+                if let Some((hx, hy)) = screen_bones[HEAD_BONE] {
+                    let r = 6;
+                    let outline_pen = CreatePen(PS_SOLID, 2, color);
+                    let null_brush = GetStockObject(NULL_BRUSH);
+                    let old_pen = SelectObject(dc, outline_pen);
+                    let old_brush = SelectObject(dc, null_brush);
+                    let _ = Ellipse(dc, hx as i32 - r, hy as i32 - r, hx as i32 + r, hy as i32 + r);
+                    SelectObject(dc, old_pen);
+                    SelectObject(dc, old_brush);
+                    let _ = DeleteObject(outline_pen);
                 }
             }
 
-            if let Some((hx, hy)) = screen_bones[6] {
-                let old_font = SelectObject(dc, self.font_small);
-                SetBkMode(dc, TRANSPARENT);
-                SetTextColor(dc, color);
-                let label = format!("{} [{}]", player.name, player.health);
-                let mut wide: Vec<u16> = label.encode_utf16().collect();
-                let mut rc = RECT {
-                    left: hx as i32 - 100,
-                    top: hy as i32 - 24,
-                    right: hx as i32 + 100,
-                    bottom: hy as i32 - 8,
-                };
-                DrawTextW(dc, &mut wide, &mut rc, DT_CENTER | DT_NOCLIP);
-                SelectObject(dc, old_font);
+            if parts.health {
+                if let (Some((_, head_y)), Some((_, feet_y))) =
+                    (screen_bones[HEAD_BONE], screen_bones[ROOT_BONE])
+                {
+                    let top_y = head_y.min(feet_y) as i32 - 8;
+                    let bot_y = head_y.max(feet_y) as i32 + 8;
+                    let bar_h = bot_y - top_y;
+                    if bar_h > 5 {
+                        let bar_x = screen_bones
+                            .iter()
+                            .filter_map(|b| b.map(|(x, _)| x as i32))
+                            .min()
+                            .unwrap_or(0)
+                            - 10;
+
+                        let bg_brush = CreateSolidBrush(COLORREF(0x00333333));
+                        let bg_rect = RECT { left: bar_x - 4, top: top_y, right: bar_x, bottom: bot_y };
+                        FillRect(dc, &bg_rect, bg_brush);
+                        let _ = DeleteObject(bg_brush);
+
+                        let hp = (player.health as f32 / 100.0).clamp(0.0, 1.0);
+                        let r = ((1.0 - hp) * 255.0) as u32;
+                        let g = (hp * 255.0) as u32;
+                        let fill_color = COLORREF(r | (g << 8));
+                        let fill_h = (bar_h as f32 * hp) as i32;
+                        let fill_brush = CreateSolidBrush(fill_color);
+                        let fill_rect = RECT { left: bar_x - 4, top: bot_y - fill_h, right: bar_x, bottom: bot_y };
+                        FillRect(dc, &fill_rect, fill_brush);
+                        let _ = DeleteObject(fill_brush);
+                    }
+                }
+            }
+
+            if parts.weapon {
+                if let (Some((name, has_mag)), Some((feet_x, _))) =
+                    (weapon_info(player.weapon_id), screen_bones[ROOT_BONE])
+                {
+                    let bottom = screen_bones
+                        .iter()
+                        .filter_map(|b| b.map(|(_, y)| y as i32))
+                        .max()
+                        .unwrap_or(0);
+                    let label = if has_mag && player.ammo >= 0 {
+                        format!("{} {}", name, player.ammo)
+                    } else {
+                        name.to_string()
+                    };
+                    let old_font = SelectObject(dc, self.font_esp);
+                    draw_outlined_text(dc, &label, feet_x as i32, bottom + 4, ESP_TEXT);
+                    SelectObject(dc, old_font);
+                }
             }
         }
     }
 
-    pub fn draw_menu(&mut self, players: &[PlayerData], visible: &[bool; 65], selected: usize) {
-        self.toggle_areas.clear();
+    /// Menu rows as (label, on).
+    pub fn draw_menu(&mut self, rows: &[(&str, bool)], selected: usize) {
+        self.menu_rows.clear();
         let dc = self.mem_dc;
 
-        let player_count = players.len() as i32;
         let footer_h = 56;
-        let toggle_all_h = ROW_H;
-        let menu_h = HEADER_H + 2 + toggle_all_h + player_count * ROW_H + footer_h;
+        let menu_h = HEADER_H + 2 + rows.len() as i32 * ROW_H + footer_h;
 
         unsafe {
             let bg = CreateSolidBrush(MENU_BG);
@@ -223,79 +252,37 @@ impl Renderer {
             let mut sub_rc = RECT { left: MENU_X + 16, top: MENU_Y + 32, right: MENU_X + MENU_W - 16, bottom: MENU_Y + HEADER_H };
             DrawTextW(dc, &mut sub, &mut sub_rc, DT_LEFT | DT_NOCLIP);
 
-            let ta_y = MENU_Y + HEADER_H + 2;
-            let row_count = 1 + players.len();
-            let sel_row = selected.min(row_count - 1) as i32;
-            let sel_brush = CreateSolidBrush(MENU_SELECTED_BG);
-            let sel_rect = RECT {
-                left: MENU_X,
-                top: ta_y + sel_row * ROW_H,
-                right: MENU_X + MENU_W,
-                bottom: ta_y + (sel_row + 1) * ROW_H,
-            };
-            FillRect(dc, &sel_rect, sel_brush);
-            let _ = DeleteObject(sel_brush);
-            let acc = CreateSolidBrush(MENU_ACCENT);
-            let acc_bar = RECT { right: MENU_X + 3, ..sel_rect };
-            FillRect(dc, &acc_bar, acc);
-            let _ = DeleteObject(acc);
-
-            SelectObject(dc, self.font);
-            SetTextColor(dc, MENU_TEXT);
-            let mut ta_text: Vec<u16> = "Toggle All".encode_utf16().collect();
-            let mut ta_rc = RECT { left: MENU_X + 16, top: ta_y + 6, right: MENU_X + 200, bottom: ta_y + ROW_H };
-            DrawTextW(dc, &mut ta_text, &mut ta_rc, DT_LEFT | DT_NOCLIP);
-
-            let any_on = players.iter().any(|p| visible[p.index]);
-            let ta_toggle_x = MENU_X + MENU_W - 66;
-            draw_toggle(dc, ta_toggle_x, ta_y + 7, any_on);
-            self.toggle_all_rect = (MENU_X, ta_y, MENU_X + MENU_W, ta_y + toggle_all_h);
-
-            let rows_start = ta_y + toggle_all_h;
-            for (row, player) in players.iter().enumerate() {
+            let rows_start = MENU_Y + HEADER_H + 2;
+            for (row, &(label, on)) in rows.iter().enumerate() {
                 let y = rows_start + row as i32 * ROW_H;
+                let row_rect = RECT { left: MENU_X, top: y, right: MENU_X + MENU_W, bottom: y + ROW_H };
 
-                let sep = CreateSolidBrush(COLORREF(0x00382828));
-                let sep_rect = RECT { left: MENU_X + 12, top: y, right: MENU_X + MENU_W - 12, bottom: y + 1 };
-                FillRect(dc, &sep_rect, sep);
-                let _ = DeleteObject(sep);
-
-                let dot_color = if player.team == 3 { CT_COLOR } else { T_COLOR };
-                let dot_brush = CreateSolidBrush(dot_color);
-                let null_pen = GetStockObject(NULL_PEN);
-                let old_pen = SelectObject(dc, null_pen);
-                let old_br = SelectObject(dc, dot_brush);
-                let _ = Ellipse(dc, MENU_X + 16, y + 11, MENU_X + 24, y + 19);
-                SelectObject(dc, old_pen);
-                SelectObject(dc, old_br);
-                let _ = DeleteObject(dot_brush);
+                if row == selected {
+                    let sel_brush = CreateSolidBrush(MENU_SELECTED_BG);
+                    FillRect(dc, &row_rect, sel_brush);
+                    let _ = DeleteObject(sel_brush);
+                    let acc = CreateSolidBrush(MENU_ACCENT);
+                    let acc_bar = RECT { right: MENU_X + 3, ..row_rect };
+                    FillRect(dc, &acc_bar, acc);
+                    let _ = DeleteObject(acc);
+                } else if row > 0 {
+                    let sep = CreateSolidBrush(COLORREF(0x00382828));
+                    let sep_rect = RECT { left: MENU_X + 12, top: y, right: MENU_X + MENU_W - 12, bottom: y + 1 };
+                    FillRect(dc, &sep_rect, sep);
+                    let _ = DeleteObject(sep);
+                }
 
                 SelectObject(dc, self.font);
                 SetTextColor(dc, MENU_TEXT);
-                let mut name_str: Vec<u16> = player.name.chars().take(16).collect::<String>().encode_utf16().collect();
-                let mut name_rc = RECT { left: MENU_X + 30, top: y + 6, right: MENU_X + 180, bottom: y + ROW_H };
-                DrawTextW(dc, &mut name_str, &mut name_rc, DT_LEFT | DT_NOCLIP);
+                let mut text: Vec<u16> = label.encode_utf16().collect();
+                let mut text_rc = RECT { left: MENU_X + 16, top: y + 6, right: MENU_X + 200, bottom: y + ROW_H };
+                DrawTextW(dc, &mut text, &mut text_rc, DT_LEFT | DT_NOCLIP);
 
-                SetTextColor(dc, MENU_SUBTEXT);
-                let mut hp_str: Vec<u16> = format!("{}hp", player.health).encode_utf16().collect();
-                let mut hp_rc = RECT { left: MENU_X + 185, top: y + 6, right: MENU_X + 230, bottom: y + ROW_H };
-                DrawTextW(dc, &mut hp_str, &mut hp_rc, DT_LEFT | DT_NOCLIP);
-
-                let is_on = visible[player.index];
-                let tx = MENU_X + MENU_W - 66;
-                let ty = y + 7;
-                draw_toggle(dc, tx, ty, is_on);
-
-                self.toggle_areas.push(ToggleArea {
-                    player_index: player.index,
-                    left: MENU_X,
-                    top: y,
-                    right: MENU_X + MENU_W,
-                    bottom: y + ROW_H,
-                });
+                draw_toggle(dc, MENU_X + MENU_W - 66, y + 7, on);
+                self.menu_rows.push(row_rect);
             }
 
-            let fy = rows_start + player_count * ROW_H + 8;
+            let fy = rows_start + rows.len() as i32 * ROW_H + 8;
             SelectObject(dc, self.font_small);
             SetTextColor(dc, MENU_SUBTEXT);
             let mut nav: Vec<u16> = "UP/DOWN: Select  |  ENTER: Toggle".encode_utf16().collect();
@@ -309,6 +296,13 @@ impl Renderer {
             SelectObject(dc, old_font);
         }
     }
+
+    /// Menu row under the cursor.
+    pub fn row_at(&self, x: i32, y: i32) -> Option<usize> {
+        self.menu_rows
+            .iter()
+            .position(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+    }
 }
 
 impl Drop for Renderer {
@@ -320,6 +314,7 @@ impl Drop for Renderer {
             let _ = DeleteObject(self.font);
             let _ = DeleteObject(self.font_title);
             let _ = DeleteObject(self.font_small);
+            let _ = DeleteObject(self.font_esp);
         }
     }
 }
@@ -334,6 +329,21 @@ unsafe fn draw_bone_lines(dc: HDC, screen_bones: &[Option<(f32, f32)>]) {
             let _ = LineTo(dc, tx as i32, ty as i32);
         }
     }
+}
+
+/// Text centred on `x` with its top at `y`, outlined in black so it stays readable
+/// over any background.
+unsafe fn draw_outlined_text(dc: HDC, text: &str, x: i32, y: i32, color: COLORREF) {
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    SetBkMode(dc, TRANSPARENT);
+    let old_align = SetTextAlign(dc, TA_CENTER | TA_TOP);
+    SetTextColor(dc, ESP_TEXT_OUTLINE);
+    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        let _ = TextOutW(dc, x + dx, y + dy, &wide);
+    }
+    SetTextColor(dc, color);
+    let _ = TextOutW(dc, x, y, &wide);
+    SetTextAlign(dc, TEXT_ALIGN_OPTIONS(old_align));
 }
 
 unsafe fn draw_toggle(dc: HDC, x: i32, y: i32, on: bool) {

@@ -41,6 +41,22 @@ impl GameProcess {
         Some(val)
     }
 
+    pub fn read_bytes(&self, addr: u64, len: usize) -> Option<Vec<u8>> {
+        let mut buf = vec![0u8; len];
+        let mut read = 0usize;
+        unsafe {
+            ReadProcessMemory(
+                self.handle,
+                addr as *const c_void,
+                buf.as_mut_ptr() as *mut c_void,
+                len,
+                Some(&mut read),
+            )
+            .ok()?;
+        }
+        Some(buf)
+    }
+
     pub fn read_string(&self, addr: u64, max: usize) -> String {
         let mut buf = vec![0u8; max];
         let mut read = 0usize;
@@ -59,6 +75,10 @@ impl GameProcess {
         }
         let end = buf.iter().position(|&b| b == 0).unwrap_or(read);
         String::from_utf8_lossy(&buf[..end]).to_string()
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.pid
     }
 
     pub fn module_base(&self, module_name: &str) -> Result<u64> {

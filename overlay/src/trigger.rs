@@ -9,8 +9,7 @@ use crate::weapons::is_gun;
 /// How long a target must stay under the crosshair before the first shot.
 const REACTION_DELAY: Duration = Duration::from_millis(30);
 
-/// Fires at enemy bots under the crosshair with a clear line of sight, never at
-/// human players.
+/// Fires at enemies under the crosshair with a clear line of sight.
 pub struct TriggerBot {
     on_target_since: Option<Instant>,
     /// The left button is currently held down by us (not by the user).
@@ -66,12 +65,12 @@ fn clear_shot_at_enemy_bot(state: &GameState, visibility: &Visibility) -> bool {
     };
     // Guns only: left click with a knife, grenade or the C4 would slash, throw or plant.
     is_gun(local.weapon_id)
-        && enemy_bot(state, local, target).is_some_and(|bot| visibility.can_see(state, bot))
+        && enemy_player(state, local, target).is_some_and(|enemy| visibility.can_see(state, enemy))
 }
 
-/// The bot driving `pawn`, provided every controller pointing at that pawn is an enemy
-/// bot. A human who takes over a bot also points at its pawn.
-pub fn enemy_bot<'a>(
+/// The player driving `pawn`, provided every controller pointing at that pawn is an
+/// enemy.
+pub fn enemy_player<'a>(
     state: &'a GameState,
     local: &PlayerData,
     pawn: u32,
@@ -79,7 +78,7 @@ pub fn enemy_bot<'a>(
     let mut drivers = state.players.iter().filter(|p| p.pawn_index == pawn).peekable();
     let first = *drivers.peek()?;
     drivers
-        .all(|p| p.is_bot && p.team != local.team)
+        .all(|p| p.team != local.team)
         .then_some(first)
 }
 
@@ -157,27 +156,17 @@ mod tests {
     }
 
     #[test]
-    fn fires_at_enemy_bot_under_the_crosshair() {
+    fn fires_at_enemy_under_the_crosshair() {
         assert!(aiming_at(200, vec![player(100, 3, false, true), player(200, 2, true, false)]));
     }
 
     #[test]
-    fn never_fires_at_humans() {
-        assert!(!aiming_at(200, vec![player(100, 3, false, true), player(200, 2, false, false)]));
+    fn fires_at_enemy_humans() {
+        assert!(aiming_at(200, vec![player(100, 3, false, true), player(200, 2, false, false)]));
     }
 
     #[test]
-    fn never_fires_at_bot_taken_over_by_human() {
-        let players = vec![
-            player(100, 3, false, true),
-            player(200, 2, true, false),
-            player(200, 2, false, false),
-        ];
-        assert!(!aiming_at(200, players));
-    }
-
-    #[test]
-    fn ignores_teammate_bots() {
+    fn ignores_teammates() {
         assert!(!aiming_at(200, vec![player(100, 3, false, true), player(200, 3, true, false)]));
     }
 

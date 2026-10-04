@@ -4,7 +4,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
 use crate::game::{GameState, LocalView, HEAD_BONE};
 use crate::math::Vec3;
-use crate::trigger::enemy_bot;
+use crate::trigger::enemy_player;
 use crate::visibility::Visibility;
 use crate::weapons::is_gun;
 
@@ -25,7 +25,7 @@ const HEAD_RADIUS: f32 = 4.0;
 /// the aim a fraction of a degree behind, and a body shot beats no shot.
 const HEAD_WAIT: Duration = Duration::from_millis(150);
 
-/// Pulls the crosshair onto the head of an enemy bot in clear view, never a human.
+/// Pulls the crosshair onto the head of an enemy in clear view.
 pub struct AimAssist {
     /// Pawn index of the bot being tracked, and since when.
     target: Option<(u32, Instant)>,
@@ -96,7 +96,7 @@ impl Target {
     }
 }
 
-/// The visible enemy bot to aim at. Sticks with `current` while it's still valid and
+/// The visible enemy to aim at. Sticks with `current` while it's still valid and
 /// inside KEEP_FOV.
 fn choose_target(
     state: &GameState,
@@ -112,7 +112,7 @@ fn choose_target(
     let candidates: Vec<Target> = state
         .players
         .iter()
-        .filter(|p| !p.is_local && enemy_bot(state, local, p.pawn_index).is_some())
+        .filter(|p| !p.is_local && enemy_player(state, local, p.pawn_index).is_some())
         .filter(|p| visibility.can_see(state, p))
         .map(|p| {
             let head = p.bones[HEAD_BONE];
@@ -297,16 +297,24 @@ mod tests {
     }
 
     #[test]
-    fn never_aims_at_humans_teammates_or_hidden_bots() {
+    fn never_aims_at_teammates_or_hidden_enemies() {
         let mut hidden = player(400, 2, true, head_at(0.0, 1.0));
         hidden.spotted_by = 0;
         let s = state(vec![
             local(),
-            player(200, 2, false, head_at(0.0, 1.0)),
             player(300, 3, true, head_at(0.0, 1.0)),
             hidden,
         ]);
         assert!(choose(&s, None).is_none());
+    }
+
+    #[test]
+    fn aims_at_enemy_humans() {
+        let s = state(vec![
+            local(),
+            player(200, 2, false, head_at(0.0, 1.0)),
+        ]);
+        assert!(choose(&s, None).is_some());
     }
 
     #[test]

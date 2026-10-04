@@ -115,8 +115,8 @@ pub fn run() {
     println!("    UP / DOWN       = Select row");
     println!("    ENTER / <- / -> = Toggle selected row");
     println!("    END             = Exit");
-    println!("    Trigger Bot is off at startup. Hold Mouse 4 to snap to the head of an enemy bot");
-    println!("    in clear view and fire; shooting by hand also pulls onto the head. Never humans.\n");
+    println!("    Trigger Bot is off at startup. Hold Mouse 4 to snap to the head of an enemy");
+    println!("    in clear view and fire; shooting by hand also pulls onto the head.\n");
 
     loop {
         unsafe {

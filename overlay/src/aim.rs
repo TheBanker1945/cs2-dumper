@@ -9,7 +9,7 @@ use crate::visibility::Visibility;
 use crate::weapons::is_gun;
 
 /// Heads within this angle of the crosshair (degrees) get picked up, so the view never
-/// whips round to someone off to the side.
+/// whips round to a target off to the side.
 const ACQUIRE_FOV: f32 = 8.0;
 /// A target already being tracked is kept until its head leaves this wider cone.
 const KEEP_FOV: f32 = 15.0;
@@ -21,13 +21,13 @@ const DEGREES_PER_COUNT: f32 = 0.022;
 /// The crosshair counts as on the head within this distance (game units) of the
 /// head bone, about the size of the head hitbox.
 const HEAD_RADIUS: f32 = 4.0;
-/// Longest the trigger waits for the crosshair to reach the head. A moving bot can keep
-/// the aim a fraction of a degree behind, and a body shot beats no shot.
+/// Longest the trigger waits for the crosshair to reach the head. A moving target can
+/// keep the aim a fraction of a degree behind, and a body shot beats no shot.
 const HEAD_WAIT: Duration = Duration::from_millis(150);
 
 /// Pulls the crosshair onto the head of an enemy in clear view.
 pub struct AimAssist {
-    /// Pawn index of the bot being tracked, and since when.
+    /// Pawn index of the target being tracked, and since when.
     target: Option<(u32, Instant)>,
     /// Sub-count mouse movement carried over to the next frame.
     carry: (f32, f32),
@@ -207,8 +207,8 @@ mod tests {
         player(100, 3, false, Vec3::default())
     }
 
-    /// An enemy bot (unless `is_bot` is false) spotted by the local player, controller
-    /// index `pawn_index / 100`, with its head at `head`.
+    /// An enemy pawn spotted by the local player, controller index `pawn_index / 100`,
+    /// with its head at `head`. `is_bot` is set verbatim on the record.
     fn player(pawn_index: u32, team: u8, is_bot: bool, head: Vec3) -> PlayerData {
         let mut bones = [Vec3::default(); MAX_BONES];
         bones[HEAD_BONE] = head;
@@ -309,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn aims_at_enemy_clients() {
+    fn aims_at_non_bot_enemies() {
         let s = state(vec![
             local(),
             player(200, 2, false, head_at(0.0, 1.0)),

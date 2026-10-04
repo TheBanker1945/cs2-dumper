@@ -161,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn fires_at_enemy_clients() {
+    fn fires_at_non_bot_enemies() {
         assert!(aiming_at(200, vec![player(100, 3, false, true), player(200, 2, false, false)]));
     }
 

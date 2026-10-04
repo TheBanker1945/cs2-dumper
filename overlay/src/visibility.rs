@@ -5,7 +5,7 @@ use crate::game::{GameState, PlayerData, HEAD_BONE};
 use crate::smoke;
 
 /// How long the spotted flag keeps counting after it drops. The server's line-of-sight
-/// check flickers off for a second or two even with a bot standing in plain view.
+/// check flickers off for a second or two even with a target standing in plain view.
 const SPOTTED_MEMORY: Duration = Duration::from_millis(1000);
 
 /// Whether the local player can see a target: under the crosshair (the game's eye

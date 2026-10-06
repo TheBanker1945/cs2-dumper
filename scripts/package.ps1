@@ -4,25 +4,27 @@ Builds UnderBoss and refreshes the folder that gets zipped and sent to friends.
 
 .DESCRIPTION
 Builds the release binary, then copies it as UnderBoss.exe, together with
-dist\README.txt, into the shared folder (Desktop\UnderBoss by default).
+dist\README.txt, into the shared folder (UnderBoss\ in the repo root by
+default, which git ignores).
 Run it after every change so the shared folder always holds the latest build.
 
 .EXAMPLE
 powershell -ExecutionPolicy Bypass -File scripts\package.ps1
-Builds and refreshes Desktop\UnderBoss.
+Builds and refreshes UnderBoss\.
 
 .EXAMPLE
 powershell -ExecutionPolicy Bypass -File scripts\package.ps1 -Zip
-Also writes Desktop\UnderBoss-v<version>.zip, ready to send.
+Also writes UnderBoss-v<version>.zip in the repo root, ready to send.
 #>
 param(
-    [string]$Destination = (Join-Path ([Environment]::GetFolderPath('Desktop')) 'UnderBoss'),
+    [string]$Destination,
     [switch]$Zip,
     [switch]$NoBuild
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
+if (-not $Destination) { $Destination = Join-Path $repo 'UnderBoss' }
 $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $repo 'target' }
 $built = Join-Path $target 'release\cs2-dumper.exe'
 

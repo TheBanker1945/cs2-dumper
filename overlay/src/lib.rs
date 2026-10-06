@@ -29,16 +29,18 @@ const VK_INSERT_CODE: i32 = 0x2D;
 const VK_END_CODE: i32 = 0x23;
 
 /// Menu rows and their state at startup. Every row works on its own.
-const MENU_ROWS: [(&str, bool); 4] = [
+const MENU_ROWS: [(&str, bool); 5] = [
     ("Skeleton", true),
     ("Health Bar", true),
     ("Weapon", true),
+    ("Name", true),
     ("Trigger Bot (hold Mouse 4)", false),
 ];
 const ROW_SKELETON: usize = 0;
 const ROW_HEALTH: usize = 1;
 const ROW_WEAPON: usize = 2;
-const ROW_TRIGGER: usize = 3;
+const ROW_NAME: usize = 3;
+const ROW_TRIGGER: usize = 4;
 
 pub fn run() {
     println!("=== CS2 Skeleton ESP Overlay ===");
@@ -187,6 +189,7 @@ pub fn run() {
             skeleton: toggles[ROW_SKELETON],
             health: toggles[ROW_HEALTH],
             weapon: toggles[ROW_WEAPON],
+            name: toggles[ROW_NAME],
         };
         for player in state.players.iter().filter(|p| !p.is_local) {
             renderer.draw_player(

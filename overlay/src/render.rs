@@ -38,7 +38,11 @@ pub struct EspParts {
     pub skeleton: bool,
     pub health: bool,
     pub weapon: bool,
+    pub name: bool,
 }
+
+/// Longer names are cut so a label can't sprawl across the screen.
+const MAX_NAME_CHARS: usize = 24;
 
 pub struct Renderer {
     mem_dc: HDC,
@@ -207,7 +211,22 @@ impl Renderer {
                         name.to_string()
                     };
                     let old_font = SelectObject(dc, self.font_esp);
-                    draw_outlined_text(dc, &label, feet_x as i32, bottom + 4, ESP_TEXT);
+                    draw_outlined_text(dc, &label, feet_x as i32, bottom + 4, TA_TOP, ESP_TEXT);
+                    SelectObject(dc, old_font);
+                }
+            }
+
+            if parts.name {
+                if let Some((x, _)) = screen_bones[HEAD_BONE].or(screen_bones[ROOT_BONE]) {
+                    // Clear of the head circle, level with the top of the health bar.
+                    let top = screen_bones
+                        .iter()
+                        .filter_map(|b| b.map(|(_, y)| y as i32))
+                        .min()
+                        .unwrap_or(0)
+                        - 8;
+                    let old_font = SelectObject(dc, self.font_esp);
+                    draw_outlined_text(dc, &name_label(player), x as i32, top, TA_BOTTOM, ESP_TEXT);
                     SelectObject(dc, old_font);
                 }
             }
@@ -331,12 +350,31 @@ unsafe fn draw_bone_lines(dc: HDC, screen_bones: &[Option<(f32, f32)>]) {
     }
 }
 
-/// Text centred on `x` with its top at `y`, outlined in black so it stays readable
-/// over any background.
-unsafe fn draw_outlined_text(dc: HDC, text: &str, x: i32, y: i32, color: COLORREF) {
+/// The player's in-game name, tagged the way the scoreboard tags bots.
+fn name_label(player: &PlayerData) -> String {
+    let mut name: String = player.name.chars().take(MAX_NAME_CHARS).collect();
+    if player.name.chars().count() > MAX_NAME_CHARS {
+        name.push_str("...");
+    }
+    if player.is_bot && !name.starts_with("BOT ") {
+        name.insert_str(0, "BOT ");
+    }
+    name
+}
+
+/// Text centred on `x`, with its top or bottom (per `valign`) at `y`, outlined in
+/// black so it stays readable over any background.
+unsafe fn draw_outlined_text(
+    dc: HDC,
+    text: &str,
+    x: i32,
+    y: i32,
+    valign: TEXT_ALIGN_OPTIONS,
+    color: COLORREF,
+) {
     let wide: Vec<u16> = text.encode_utf16().collect();
     SetBkMode(dc, TRANSPARENT);
-    let old_align = SetTextAlign(dc, TA_CENTER | TA_TOP);
+    let old_align = SetTextAlign(dc, TA_CENTER | valign);
     SetTextColor(dc, ESP_TEXT_OUTLINE);
     for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
         let _ = TextOutW(dc, x + dx, y + dy, &wide);

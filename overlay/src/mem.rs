@@ -3,13 +3,15 @@ use std::mem;
 
 use anyhow::{bail, Result};
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, STILL_ACTIVE};
 use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, Process32FirstW, Process32NextW,
     MODULEENTRY32W, PROCESSENTRY32W, TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32, TH32CS_SNAPPROCESS,
 };
-use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+use windows::Win32::System::Threading::{
+    GetExitCodeProcess, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+};
 
 pub struct GameProcess {
     handle: HANDLE,
@@ -84,6 +86,12 @@ impl GameProcess {
     pub fn module_base(&self, module_name: &str) -> Result<u64> {
         find_module(self.pid, module_name)
     }
+
+    /// False once the game has exited.
+    pub fn is_alive(&self) -> bool {
+        let mut code = 0u32;
+        unsafe { GetExitCodeProcess(self.handle, &mut code).is_ok() && code == STILL_ACTIVE.0 as u32 }
+    }
 }
 
 impl Drop for GameProcess {
@@ -94,7 +102,7 @@ impl Drop for GameProcess {
     }
 }
 
-fn find_pid(name: &str) -> Result<u32> {
+pub fn find_pid(name: &str) -> Result<u32> {
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?;
         let mut entry = PROCESSENTRY32W {

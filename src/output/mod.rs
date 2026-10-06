@@ -138,6 +138,21 @@ impl<'a> Output<'a> {
         Ok(())
     }
 
+    /// Renders the two files the overlay reads, `offsets.json` and `client_dll.json`, in memory
+    /// instead of writing the whole dump to disk.
+    pub fn overlay_json(result: &AnalysisResult) -> Result<(String, String)> {
+        let client = result
+            .schemas
+            .get("client.dll")
+            .ok_or(anyhow!("client.dll schemas not found"))?;
+        let client = SchemaMap::from([("client.dll".to_string(), client.clone())]);
+
+        Ok((
+            render_json(&Item::Offsets(&result.offsets))?,
+            render_json(&Item::Schemas(&client))?,
+        ))
+    }
+
     fn dump_info<P: MemoryView + Process>(&self, process: &mut P) -> Result<()> {
         let file_path = self.out_dir.join("info.json");
 
@@ -198,6 +213,15 @@ impl<'a> Output<'a> {
 
         Ok(())
     }
+}
+
+/// The same text `dump_item` writes to a `.json` file.
+fn render_json(item: &Item) -> Result<String> {
+    let mut out = String::new();
+
+    item.write_json(&mut Formatter::new(&mut out, 0))?;
+
+    Ok(out)
 }
 
 #[inline]

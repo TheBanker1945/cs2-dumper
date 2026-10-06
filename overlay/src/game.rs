@@ -83,15 +83,21 @@ pub struct Offsets {
 }
 
 impl Offsets {
+    /// Reads `offsets.json` and `client_dll.json` from a dump on disk.
     pub fn load(output_dir: &str) -> Result<Self> {
-        let offsets: Value = serde_json::from_str(
+        Self::from_json(
             &fs::read_to_string(format!("{}/offsets.json", output_dir))
                 .context("Run the dumper first to generate output/offsets.json")?,
-        )?;
-        let client: Value = serde_json::from_str(
             &fs::read_to_string(format!("{}/client_dll.json", output_dir))
                 .context("Run the dumper first to generate output/client_dll.json")?,
-        )?;
+        )
+    }
+
+    /// Parses the contents of `offsets.json` and `client_dll.json`. Fails if any offset the
+    /// overlay needs is missing, e.g. in a dump taken while CS2 was still loading.
+    pub fn from_json(offsets_json: &str, client_json: &str) -> Result<Self> {
+        let offsets: Value = serde_json::from_str(offsets_json)?;
+        let client: Value = serde_json::from_str(client_json)?;
 
         let cl = &offsets["client.dll"];
         let en = &offsets["engine2.dll"];

@@ -94,6 +94,20 @@ impl Renderer {
         }
     }
 
+    /// Reallocates the back buffer after the game window changes size.
+    pub fn resize(&mut self, width: i32, height: i32) {
+        unsafe {
+            let screen_dc = GetDC(HWND::default());
+            let bitmap = CreateCompatibleBitmap(screen_dc, width, height);
+            ReleaseDC(HWND::default(), screen_dc);
+            SelectObject(self.mem_dc, bitmap);
+            let _ = DeleteObject(self.bitmap);
+            self.bitmap = bitmap;
+        }
+        self.width = width;
+        self.height = height;
+    }
+
     pub fn begin_frame(&self) {
         unsafe {
             let rect = RECT {
@@ -261,13 +275,13 @@ impl Renderer {
 
             let old_font = SelectObject(dc, self.font_title);
             SetTextColor(dc, MENU_TEXT);
-            let mut title: Vec<u16> = "CS2 SKELETON ESP".encode_utf16().collect();
+            let mut title: Vec<u16> = "UNDERBOSS".encode_utf16().collect();
             let mut title_rc = RECT { left: MENU_X + 16, top: MENU_Y + 8, right: MENU_X + MENU_W - 16, bottom: MENU_Y + 30 };
             DrawTextW(dc, &mut title, &mut title_rc, DT_LEFT | DT_NOCLIP);
 
             SelectObject(dc, self.font_small);
             SetTextColor(dc, MENU_SUBTEXT);
-            let mut sub: Vec<u16> = "Educational Purpose Only".encode_utf16().collect();
+            let mut sub: Vec<u16> = format!("v{}", crate::VERSION).encode_utf16().collect();
             let mut sub_rc = RECT { left: MENU_X + 16, top: MENU_Y + 32, right: MENU_X + MENU_W - 16, bottom: MENU_Y + HEADER_H };
             DrawTextW(dc, &mut sub, &mut sub_rc, DT_LEFT | DT_NOCLIP);
 

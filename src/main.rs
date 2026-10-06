@@ -70,41 +70,67 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    #[allow(unused_mut)]
-    let mut args = Args::parse();
-
-    // Double-clicking the exe (or starting it from a shortcut) passes no arguments. Treat that
-    // as "dump fresh offsets, then launch the overlay", and keep the console open on errors.
+    // Double-clicking the exe (or starting it from a shortcut) passes no arguments: that is
+    // UnderBoss for players. Any argument selects the original dumper command line.
     #[cfg(windows)]
-    let launched_bare = std::env::args_os().len() <= 1;
-    #[cfg(not(windows))]
-    let launched_bare = false;
-
-    if launched_bare {
-        #[cfg(windows)]
-        {
-            args.overlay = true;
-        }
-
-        // Shortcuts and pinned launches may start us in an arbitrary directory; keep output/
-        // and the log file next to the exe so the overlay always finds the fresh dump.
-        if let Some(dir) = std::env::current_exe()?.parent() {
-            std::env::set_current_dir(dir)?;
-        }
-    }
-
-    let result = run(args);
-
-    if launched_bare {
-        if let Err(e) = &result {
-            eprintln!("\n[!] {:?}", e);
-            println!("\nPress Enter to exit...");
-            let _ = std::io::stdin().read_line(&mut String::new());
+    if std::env::args_os().len() <= 1 {
+        if let Err(e) = run_underboss() {
+            eprintln!("\n[!] {:#}", e);
+            cs2_overlay::wait_for_enter();
             std::process::exit(1);
         }
+
+        return Ok(());
     }
 
-    result
+    run(Args::parse())
+}
+
+/// Waits for CS2, reads fresh offsets from it in memory (nothing is written to disk), then runs
+/// the overlay until the player or CS2 closes it.
+#[cfg(windows)]
+fn run_underboss() -> Result<()> {
+    cs2_overlay::print_banner();
+    cs2_overlay::wait_for_game();
+
+    let mut os = memflow_native::create_os(&OsArgs::default(), LibArc::default())?;
+    let mut process = os.process_by_name("cs2.exe")?;
+
+    // CS2 registers its classes a few seconds after the process starts, so a dump taken too
+    // early is incomplete. Retry until every offset the overlay needs is there.
+    println!("[*] Reading offsets from CS2...");
+
+    let mut attempts = 0;
+
+    let offsets = loop {
+        let parsed = analysis::analyze_all(&mut process)
+            .and_then(|result| Output::overlay_json(&result))
+            .and_then(|(offsets, client)| cs2_overlay::Offsets::from_json(&offsets, &client));
+
+        match parsed {
+            Ok(offsets) => break offsets,
+            Err(_) if attempts < 20 => {
+                if attempts == 0 {
+                    println!("[*] CS2 is still loading, waiting...");
+                }
+
+                attempts += 1;
+
+                std::thread::sleep(std::time::Duration::from_secs(3));
+            }
+            Err(e) => {
+                return Err(e.context(
+                    "couldn't read offsets from CS2. If CS2 just updated, you need a newer UnderBoss",
+                ));
+            }
+        }
+    };
+
+    println!("[+] Offsets ready.");
+
+    cs2_overlay::start(offsets);
+
+    Ok(())
 }
 
 fn run(args: Args) -> Result<()> {
@@ -182,8 +208,10 @@ fn run(args: Args) -> Result<()> {
 
     #[cfg(windows)]
     if args.overlay {
-        println!("\n[*] Launching ESP overlay...");
-        cs2_overlay::run();
+        let (offsets, client) = Output::overlay_json(&result)?;
+
+        println!("\n[*] Launching overlay...");
+        cs2_overlay::start(cs2_overlay::Offsets::from_json(&offsets, &client)?);
     }
 
     Ok(())

@@ -1,9 +1,13 @@
 use std::time::{Duration, Instant};
 
-use windows::core::w;
+use windows::core::{w, HSTRING};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::System::Console::SetConsoleTitleW;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::{
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -12,29 +16,35 @@ mod game;
 mod math;
 mod mem;
 mod render;
+mod settings;
 mod smoke;
 mod trigger;
 mod visibility;
 mod weapons;
 
+pub use game::Offsets;
+
 use aim::AimAssist;
-use game::{read_game_state, Offsets};
+use game::read_game_state;
 use mem::GameProcess;
 use render::{EspParts, Renderer};
 use smoke::SmokeScanner;
 use trigger::TriggerBot;
 use visibility::Visibility;
 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const GAME_EXE: &str = "cs2.exe";
 const VK_INSERT_CODE: i32 = 0x2D;
 const VK_END_CODE: i32 = 0x23;
 
-/// Menu rows and their state at startup. Every row works on its own.
-const MENU_ROWS: [(&str, bool); 5] = [
-    ("Skeleton", true),
-    ("Health Bar", true),
-    ("Weapon", true),
-    ("Name", true),
-    ("Trigger Bot (hold Mouse 4)", false),
+/// Menu rows as (settings key, label, state on first launch). Every row works on its own.
+const MENU_ROWS: [(&str, &str, bool); 5] = [
+    ("skeleton", "Skeleton", true),
+    ("health", "Health Bar", true),
+    ("weapon", "Weapon", true),
+    ("name", "Name", true),
+    ("trigger", "Trigger Bot (hold Mouse 4)", false),
 ];
 const ROW_SKELETON: usize = 0;
 const ROW_HEALTH: usize = 1;
@@ -42,29 +52,55 @@ const ROW_WEAPON: usize = 2;
 const ROW_NAME: usize = 3;
 const ROW_TRIGGER: usize = 4;
 
+/// Names the console window and prints the UnderBoss header.
+pub fn print_banner() {
+    unsafe {
+        let _ = SetConsoleTitleW(&HSTRING::from(format!("UnderBoss v{VERSION}")));
+    }
+    println!("==================================");
+    println!("      U N D E R B O S S   v{VERSION}");
+    println!("==================================\n");
+}
+
+/// Blocks until CS2 is running.
+pub fn wait_for_game() {
+    if mem::find_pid(GAME_EXE).is_ok() {
+        return;
+    }
+    println!("[*] Waiting for CS2. Start the game and UnderBoss attaches by itself.");
+    while mem::find_pid(GAME_EXE).is_err() {
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    println!("[+] CS2 started.");
+}
+
+/// Standalone overlay: reads offsets from an earlier dump in output/.
 pub fn run() {
-    println!("=== CS2 Skeleton ESP Overlay ===");
-    println!("    Educational Purpose Only\n");
-
+    print_banner();
     println!("[*] Loading offsets from output/ ...");
-    let offsets = match Offsets::load("output") {
-        Ok(o) => o,
+    match Offsets::load("output") {
+        Ok(offsets) => start(offsets),
         Err(e) => {
-            eprintln!("[!] {}", e);
-            eprintln!("[!] Make sure to run the cs2-dumper first.");
-            wait_for_key();
-            return;
+            eprintln!("[!] {:#}", e);
+            wait_for_enter();
         }
-    };
-    println!("[+] Offsets loaded successfully.");
+    }
+}
 
-    println!("[*] Searching for CS2 process...");
-    let process = match GameProcess::open("cs2.exe") {
+/// Runs the overlay on top of CS2 until END is pressed in game or CS2 closes.
+pub fn start(offsets: Offsets) {
+    // Work in physical pixels. Otherwise Windows rescales the overlay at 125% or 150%
+    // display scaling and the ESP lands beside the players instead of on them.
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+
+    let process = match GameProcess::open(GAME_EXE) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("[!] {}", e);
-            eprintln!("[!] Run this as Administrator if CS2 is running.");
-            wait_for_key();
+            eprintln!("[!] Run UnderBoss as Administrator if CS2 is running.");
+            wait_for_enter();
             return;
         }
     };
@@ -73,7 +109,7 @@ pub fn run() {
         Ok(b) => b,
         Err(e) => {
             eprintln!("[!] {}", e);
-            wait_for_key();
+            wait_for_enter();
             return;
         }
     };
@@ -81,23 +117,24 @@ pub fn run() {
         Ok(b) => b,
         Err(e) => {
             eprintln!("[!] {}", e);
-            wait_for_key();
+            wait_for_enter();
             return;
         }
     };
-    println!("[+] CS2 found. client.dll @ {:#X}, engine2.dll @ {:#X}", client_base, engine_base);
 
     let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
     let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
     let hwnd = create_overlay_window(screen_w, screen_h);
     if hwnd.0.is_null() {
         eprintln!("[!] Failed to create overlay window.");
-        wait_for_key();
+        wait_for_enter();
         return;
     }
 
     let mut renderer = Renderer::new(screen_w, screen_h);
-    let mut toggles = MENU_ROWS.map(|(_, on)| on);
+    let mut bounds = RECT { left: 0, top: 0, right: screen_w, bottom: screen_h };
+    let mut game_window = HWND::default();
+    let mut toggles = settings::load(MENU_ROWS.map(|(key, _, on)| (key, on)));
     let mut trigger = TriggerBot::new();
     let mut aim = AimAssist::new();
     let mut visibility = Visibility::new();
@@ -111,14 +148,16 @@ pub fn run() {
     let mut left_key = KeyEdge::new(VK_LEFT.0 as i32);
     let mut right_key = KeyEdge::new(VK_RIGHT.0 as i32);
     let mut enter_key = KeyEdge::new(VK_RETURN.0 as i32);
+    let mut last_alive_check = Instant::now();
 
-    println!("[+] Overlay running!");
-    println!("    INSERT          = Toggle Menu");
+    println!("[+] UnderBoss is running. Switch to CS2 to see it.\n");
+    println!("    INSERT          = Open / close menu");
     println!("    UP / DOWN       = Select row");
     println!("    ENTER / <- / -> = Toggle selected row");
-    println!("    END             = Exit");
-    println!("    Trigger Bot is off at startup. Hold Mouse 4 to snap to the head of an enemy");
-    println!("    in clear view and fire; shooting by hand also pulls onto the head.\n");
+    println!("    END             = Quit UnderBoss");
+    println!("    Mouse 4 (hold)  = Trigger Bot, when switched on in the menu\n");
+    println!("    Keys only work while CS2 is the active window. Your toggles are saved.");
+    println!("    UnderBoss closes by itself when CS2 closes.\n");
 
     loop {
         unsafe {
@@ -132,21 +171,48 @@ pub fn run() {
             }
         }
 
-        if key_down(VK_END_CODE) {
+        if last_alive_check.elapsed() >= Duration::from_secs(1) {
+            last_alive_check = Instant::now();
+            if !process.is_alive() {
+                println!("[*] CS2 closed. UnderBoss is shutting down.");
+                break;
+            }
+        }
+
+        // Sit exactly over the game's drawable area, wherever its window is: fullscreen,
+        // windowed, borderless or on another monitor.
+        if !unsafe { IsWindow(game_window) }.as_bool() {
+            game_window = find_game_window(process.pid());
+        }
+        if let Some(rect) = client_rect_on_screen(game_window) {
+            if rect != bounds {
+                follow_game_window(hwnd, &mut renderer, rect);
+                bounds = rect;
+            }
+        }
+
+        // Draw and take hotkeys only while CS2 is the active window, so nothing shows over
+        // the desktop and END pressed in another app doesn't close UnderBoss.
+        let game_active =
+            game_focused(process.pid()) && !unsafe { IsIconic(game_window) }.as_bool();
+
+        if game_active && key_down(VK_END_CODE) {
             println!("[*] Exiting...");
             break;
         }
 
-        if insert_key.pressed() {
-            menu_open = !menu_open;
-            set_click_through(hwnd, !menu_open);
-        }
-
         // Poll every key each frame so edge state stays current even while the menu is closed.
+        let insert = insert_key.pressed() && game_active;
         let clicked = mouse_key.pressed();
         let up = up_key.pressed();
         let down = down_key.pressed();
         let toggle = enter_key.pressed() | left_key.pressed() | right_key.pressed();
+
+        if insert || (menu_open && !game_active) {
+            menu_open = !menu_open;
+            set_click_through(hwnd, !menu_open);
+        }
+        let toggles_before = toggles;
 
         if menu_open {
             // Keyboard navigation works in every display mode. In a match CS2 owns the
@@ -172,12 +238,16 @@ pub fn run() {
             }
         }
 
+        if toggles != toggles_before {
+            settings::save(MENU_ROWS.iter().zip(toggles).map(|(&(key, _, _), on)| (key, on)));
+        }
+
         let state = read_game_state(&process, &offsets, client_base, engine_base, &mut smoke_scanner);
         visibility.update(&state, Instant::now());
 
         // Head aim is part of the trigger bot: holding Mouse 4 pulls onto the head and
         // fires once the crosshair is there, and shooting by hand pulls onto it too.
-        let trigger_on = toggles[ROW_TRIGGER] && !menu_open && game_focused(process.pid());
+        let trigger_on = toggles[ROW_TRIGGER] && !menu_open && game_active;
         let trigger_key = trigger_on && key_down(VK_XBUTTON1.0 as i32);
         let aiming = trigger_key || (trigger_on && key_down(VK_LBUTTON.0 as i32));
         aim.update(aiming, &state, &visibility);
@@ -185,27 +255,29 @@ pub fn run() {
 
         renderer.begin_frame();
 
-        let parts = EspParts {
-            skeleton: toggles[ROW_SKELETON],
-            health: toggles[ROW_HEALTH],
-            weapon: toggles[ROW_WEAPON],
-            name: toggles[ROW_NAME],
-        };
-        for player in state.players.iter().filter(|p| !p.is_local) {
-            renderer.draw_player(
-                player,
-                &state.view_matrix,
-                state.screen_width,
-                state.screen_height,
-                parts,
-            );
+        if game_active {
+            let parts = EspParts {
+                skeleton: toggles[ROW_SKELETON],
+                health: toggles[ROW_HEALTH],
+                weapon: toggles[ROW_WEAPON],
+                name: toggles[ROW_NAME],
+            };
+            for player in state.players.iter().filter(|p| !p.is_local) {
+                renderer.draw_player(
+                    player,
+                    &state.view_matrix,
+                    state.screen_width,
+                    state.screen_height,
+                    parts,
+                );
+            }
         }
 
         if menu_open {
             let rows: Vec<(&str, bool)> = MENU_ROWS
                 .iter()
                 .zip(toggles)
-                .map(|(&(label, _), on)| (label, on))
+                .map(|(&(_, label, _), on)| (label, on))
                 .collect();
             renderer.draw_menu(&rows, selected);
         }
@@ -220,7 +292,7 @@ pub fn run() {
 fn create_overlay_window(width: i32, height: i32) -> HWND {
     unsafe {
         let instance = GetModuleHandleW(None).unwrap_or_default();
-        let class_name = w!("CS2OverlayClass");
+        let class_name = w!("UnderBossOverlay");
 
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -306,6 +378,75 @@ fn game_focused(game_pid: u32) -> bool {
     }
 }
 
+/// CS2's main window: the largest visible top-level window the game owns.
+fn find_game_window(game_pid: u32) -> HWND {
+    struct Search {
+        pid: u32,
+        best: HWND,
+        area: i64,
+    }
+
+    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let search = &mut *(lparam.0 as *mut Search);
+        let mut pid = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let mut rc = RECT::default();
+        if pid == search.pid && IsWindowVisible(hwnd).as_bool() && GetWindowRect(hwnd, &mut rc).is_ok() {
+            let area = (rc.right - rc.left) as i64 * (rc.bottom - rc.top) as i64;
+            if area > search.area {
+                search.best = hwnd;
+                search.area = area;
+            }
+        }
+        TRUE
+    }
+
+    let mut search = Search { pid: game_pid, best: HWND::default(), area: 0 };
+    unsafe {
+        let _ = EnumWindows(Some(visit), LPARAM(&mut search as *mut Search as isize));
+    }
+    search.best
+}
+
+/// The game's drawable area in screen pixels; None while it's minimized or not found.
+fn client_rect_on_screen(game_window: HWND) -> Option<RECT> {
+    unsafe {
+        if game_window.0.is_null() || IsIconic(game_window).as_bool() {
+            return None;
+        }
+        let mut rc = RECT::default();
+        GetClientRect(game_window, &mut rc).ok()?;
+        let mut origin = POINT::default();
+        if !ClientToScreen(game_window, &mut origin).as_bool() || rc.right <= 0 || rc.bottom <= 0 {
+            return None;
+        }
+        Some(RECT {
+            left: origin.x,
+            top: origin.y,
+            right: origin.x + rc.right,
+            bottom: origin.y + rc.bottom,
+        })
+    }
+}
+
+fn follow_game_window(hwnd: HWND, renderer: &mut Renderer, rect: RECT) {
+    let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+    if width != renderer.width || height != renderer.height {
+        renderer.resize(width, height);
+    }
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            HWND::default(),
+            rect.left,
+            rect.top,
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
 /// CS2 (an SDL window) makes itself topmost in Fullscreen mode and re-raises itself
 /// every time it gains focus, which puts it above the overlay. Climb back to the top
 /// of the topmost band whenever one of the game's windows is above ours.
@@ -372,7 +513,8 @@ impl KeyEdge {
     }
 }
 
-fn wait_for_key() {
+/// Keeps the console open so the player can read an error before it closes.
+pub fn wait_for_enter() {
     println!("\nPress Enter to exit...");
     let _ = std::io::stdin().read_line(&mut String::new());
 }
